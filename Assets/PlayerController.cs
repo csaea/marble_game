@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using System.Collections.Generic;
 
 /// <summary>
 /// Translates Move input into camera-relative force on the marble, with
@@ -9,21 +10,20 @@ using UnityEngine.InputSystem;
 ///     THROTTLE  (along travel)  — capped by maxControlledSpeed when
 ///                                 accelerating; braking is always allowed.
 ///     STEERING  (perp to travel) — always applied.
+///   AIRBORNE — the "letting go" moment. NO throttle, only a faint steer.
 ///
-///   AIRBORNE — the "letting go" moment. NO throttle, NO acceleration, NO
-///     speed cap. Only a faint steering nudge.
+/// GRAVITY — applied entirely by this script. Rigidbody 'Use Gravity' is
+///   forced off in Awake so this script is the single source of truth.
 ///
-/// GRAVITY — applied entirely by this script (Approach B). The Rigidbody's
-///   own Use Gravity MUST be turned OFF; this script is then the single
-///   source of truth for the marble's gravity, so it can be tuned strong
-///   for a snappy marble-like fall and modulated later for cinematic moments.
+/// GROUND CHECK — downward spherecast + coyote grace buffer.
 ///
-/// Ground state uses a downward spherecast plus a coyote-style grace buffer.
+/// ANTI-STUCK ESCAPE — when the marble is wedged in a sharp corner (touching
+///   2+ differently-facing surfaces), is nearly stationary, AND the player is
+///   giving input, an escape force is applied along the summed contact
+///   normals (the open-space direction), blended with player input. This
+///   guarantees the player can always work the marble free of a corner.
 ///
-/// RESET — R returns the marble to its respawn point and zeroes all motion.
-///   Respawn point is checkpoint-ready via SetRespawnPoint().
-///
-/// "Forward" is always camera-relative, since a sphere has no facing.
+/// RESET — R returns the marble to its respawn point; checkpoint-ready.
 /// </summary>
 [RequireComponent(typeof(Rigidbody))]
 [RequireComponent(typeof(SphereCollider))]
@@ -44,28 +44,36 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float steerForce = 22f;
 
     [Header("Air control — the 'letting go' moment")]
-    [Tooltip("Faint sideways nudge allowed mid-air. Deliberately small. "
-           + "There is NO air throttle — the player cannot accelerate airborne.")]
+    [Tooltip("Faint sideways nudge allowed mid-air. NO air throttle.")]
     [SerializeField] private float airSteerForce = 4f;
 
-    [Header("Gravity (this script is the ONLY source — turn OFF Use Gravity " +
-            "on the Rigidbody)")]
-    [Tooltip("Downward acceleration in units/sec^2. Unity's default is 9.81 "
-           + "(real earth gravity). A game-scale marble usually wants MORE — "
-           + "try 20-30 so it drops with weight instead of hanging. Applied "
-           + "as acceleration, so it is correctly independent of mass.")]
+    [Header("Gravity (this script is the ONLY source — Use Gravity is forced off)")]
+    [Tooltip("Downward acceleration in units/sec^2. Applied mass-independently.")]
     [SerializeField] private float gravityStrength = 24f;
 
     [Header("Ground check")]
-    [Tooltip("Layers treated as ground. Set to your 'ground' layer.")]
     [SerializeField] private LayerMask groundMask;
-
-    [Tooltip("How far below the marble's surface the spherecast probes.")]
     [SerializeField] private float groundProbeDistance = 0.15f;
-
-    [Tooltip("Coyote grace: the marble is only AIRBORNE once the ground probe "
-           + "has missed continuously for this long. Swallows small bounces.")]
     [SerializeField] private float groundGraceWindow = 0.12f;
+
+    [Header("Anti-stuck escape")]
+    [Tooltip("Marble is considered 'wedged' only when its speed is below this. "
+           + "Above it, the marble is clearly already moving and needs no help.")]
+    [SerializeField] private float stuckSpeedThreshold = 0.8f;
+
+    [Tooltip("Two contact normals count as DIFFERENT surfaces (a real corner) "
+           + "only if they differ by more than this angle, in degrees. Stops "
+           + "two contacts on one flat wall from triggering the escape.")]
+    [SerializeField] private float cornerNormalAngle = 25f;
+
+    [Tooltip("Escape force applied to work the marble out of a corner.")]
+    [SerializeField] private float escapeForce = 30f;
+
+    [Tooltip("Blend of the escape: 1 = purely along the open-space normal, "
+           + "0 = purely player input. Mid values leave the corner biased "
+           + "toward where the player is steering.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float escapeNormalBias = 0.6f;
 
     [Header("Tuning")]
     [Tooltip("Below this speed the travel direction is unreliable; grounded "
@@ -89,6 +97,10 @@ public class PlayerController : MonoBehaviour
     private Vector3 respawnPosition;
     private Quaternion respawnRotation;
 
+    // --- Contact tracking (for anti-stuck) ---
+    // Contact normals gathered this physics step, cleared each FixedUpdate.
+    private readonly List<Vector3> contactNormals = new List<Vector3>();
+
     private void Awake()
     {
         rb     = GetComponent<Rigidbody>();
@@ -97,9 +109,6 @@ public class PlayerController : MonoBehaviour
         if (cameraTransform == null && Camera.main != null)
             cameraTransform = Camera.main.transform;
 
-        // Safety: this script owns gravity. If Use Gravity was left on, the
-        // marble would fall under BOTH. Force it off and warn, so the
-        // single-source-of-truth guarantee actually holds.
         if (rb.useGravity)
         {
             rb.useGravity = false;
@@ -127,32 +136,97 @@ public class PlayerController : MonoBehaviour
             resetRequested = true;
     }
 
+    // Gather every contact normal the marble currently has. OnCollisionStay
+    // fires each physics step for every collider still in contact.
+    private void OnCollisionStay(Collision collision)
+    {
+        for (int i = 0; i < collision.contactCount; i++)
+            contactNormals.Add(collision.GetContact(i).normal);
+    }
+
     private void FixedUpdate()
     {
         if (resetRequested)
         {
             DoReset();
             resetRequested = false;
+            contactNormals.Clear();
             return;
         }
 
         UpdateGroundState();
         ApplyGravity();
 
-        if (cameraTransform == null) return;
-        if (moveInput.sqrMagnitude < 0.0001f) return;
+        bool hasInput = moveInput.sqrMagnitude > 0.0001f;
+        Vector3 desiredDir = hasInput && cameraTransform != null
+            ? CameraRelativeDirection(moveInput)
+            : Vector3.zero;
 
-        Vector3 desiredDir = CameraRelativeDirection(moveInput);
+        // Anti-stuck escape runs BEFORE normal control and, when it fires,
+        // replaces normal control for this step.
+        if (hasInput && TryEscapeCorner(desiredDir))
+        {
+            contactNormals.Clear();
+            return;
+        }
 
-        if (isGrounded) ApplyGroundForce(desiredDir);
-        else            ApplyAirForce(desiredDir);
+        if (hasInput && cameraTransform != null)
+        {
+            if (isGrounded) ApplyGroundForce(desiredDir);
+            else            ApplyAirForce(desiredDir);
+        }
+
+        // Contacts are per-step; clear them for the next step's gathering.
+        contactNormals.Clear();
     }
 
     /// <summary>
-    /// The marble's entire gravity. ForceMode.Acceleration ignores mass, so
-    /// gravityStrength is a true acceleration (units/sec^2) — physically
-    /// correct, and changing Mass never alters the fall rate.
+    /// If the marble is wedged in a sharp corner and nearly stationary, applies
+    /// an escape force along the summed contact normals (open-space direction)
+    /// blended with player input. Returns true if the escape fired.
     /// </summary>
+    private bool TryEscapeCorner(Vector3 desiredDir)
+    {
+        // Must be nearly stationary — a moving marble is not stuck.
+        if (rb.linearVelocity.magnitude > stuckSpeedThreshold) return false;
+
+        // Need at least two contacts to form a corner.
+        if (contactNormals.Count < 2) return false;
+
+        // Confirm the contacts represent genuinely DIFFERENT surfaces — not
+        // several contact points on one flat wall. Find any pair of normals
+        // that differ by more than cornerNormalAngle.
+        bool realCorner = false;
+        for (int i = 0; i < contactNormals.Count && !realCorner; i++)
+            for (int j = i + 1; j < contactNormals.Count; j++)
+                if (Vector3.Angle(contactNormals[i], contactNormals[j]) > cornerNormalAngle)
+                {
+                    realCorner = true;
+                    break;
+                }
+        if (!realCorner) return false;
+
+        // Sum the normals → a direction pointing away from all touched
+        // surfaces, i.e. toward open space. Flatten Y so the escape pushes
+        // the marble along the ground, not up into the air.
+        Vector3 openDir = Vector3.zero;
+        foreach (Vector3 n in contactNormals)
+            openDir += n;
+        openDir.y = 0f;
+
+        if (openDir.sqrMagnitude < 0.0001f) return false;   // degenerate — give up gracefully
+        openDir.Normalize();
+
+        // Blend the open-space direction with the player's input.
+        Vector3 escapeDir = (openDir * escapeNormalBias
+                          + desiredDir * (1f - escapeNormalBias));
+        if (escapeDir.sqrMagnitude < 0.0001f) escapeDir = openDir;
+        escapeDir.Normalize();
+
+        rb.AddForce(escapeDir * escapeForce, ForceMode.Force);
+        return true;
+    }
+
     private void ApplyGravity()
     {
         rb.AddForce(Vector3.down * gravityStrength, ForceMode.Acceleration);
@@ -162,10 +236,8 @@ public class PlayerController : MonoBehaviour
     {
         rb.linearVelocity  = Vector3.zero;
         rb.angularVelocity = Vector3.zero;
-
         rb.MovePosition(respawnPosition);
         rb.MoveRotation(respawnRotation);
-
         lastGroundedTime = -999f;
     }
 

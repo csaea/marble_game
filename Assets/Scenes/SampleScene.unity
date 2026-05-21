@@ -1237,7 +1237,7 @@ Transform:
   m_GameObject: {fileID: 125622680}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 497.14548, y: -16.91, z: -694.6428}
+  m_LocalPosition: {x: 501.13, y: -16.91, z: -694.6428}
   m_LocalScale: {x: 10, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -1912,7 +1912,7 @@ Transform:
   m_GameObject: {fileID: 199006339}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 490.3255, y: -44.72, z: -617.92285}
+  m_LocalPosition: {x: 488.32, y: -44.72, z: -617.92285}
   m_LocalScale: {x: 10, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -2893,6 +2893,12 @@ MonoBehaviour:
     m_PostInfinity: 2
     m_RotationOrder: 4
   zoomSharpness: 4
+  collisionMask:
+    serializedVersion: 2
+    m_Bits: 0
+  collisionProbeRadius: 0.3
+  obstructedOffset: {x: 0, y: 7, z: -3}
+  collisionBlendSharpness: 8
 --- !u!1 &347673343
 GameObject:
   m_ObjectHideFlags: 0
@@ -3060,7 +3066,7 @@ MonoBehaviour:
   reCenterAlignment: 0.25
   reCenterFullAlignment: 0.7
   pitchReturnSharpness: 3
-  freeLookSpeed: 180
+  freeLookSpeed: 700
   minPitch: -60
   maxPitch: 75
   restOffset: {x: 0, y: 3, z: -8}
@@ -3091,6 +3097,12 @@ MonoBehaviour:
     m_PostInfinity: 2
     m_RotationOrder: 4
   zoomSharpness: 4
+  collisionMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  collisionProbeRadius: 0.3
+  obstructedOffset: {x: 0, y: 7, z: -3}
+  collisionBlendSharpness: 8
 --- !u!1 &376361057
 GameObject:
   m_ObjectHideFlags: 0
@@ -4215,7 +4227,7 @@ Transform:
   m_GameObject: {fileID: 621798291}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 499.70547, y: -35.15, z: -642.53284}
+  m_LocalPosition: {x: 502.07, y: -35.15, z: -642.53284}
   m_LocalScale: {x: 10, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -5001,7 +5013,7 @@ Transform:
   m_GameObject: {fileID: 808072067}
   serializedVersion: 2
   m_LocalRotation: {x: 0.7071068, y: 0, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 17.8, y: -216.9, z: 500.9}
+  m_LocalPosition: {x: 19.88, y: -232.1, z: 475.35}
   m_LocalScale: {x: 20, y: 20, z: 0.5}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -7678,7 +7690,7 @@ Transform:
   m_GameObject: {fileID: 1263477397}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 489.92548, y: -24.71, z: -672.40283}
+  m_LocalPosition: {x: 488.31, y: -24.71, z: -672.40283}
   m_LocalScale: {x: 10, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -10139,7 +10151,7 @@ Rigidbody:
     m_Bits: 0
   m_ImplicitCom: 1
   m_ImplicitTensor: 1
-  m_UseGravity: 1
+  m_UseGravity: 0
   m_IsKinematic: 0
   m_Interpolate: 1
   m_Constraints: 0
@@ -10252,14 +10264,19 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PlayerController
   cameraTransform: {fileID: 330585546}
   moveForce: 17
-  maxControlledSpeed: 14
+  maxControlledSpeed: 12
   steerForce: 22
   airSteerForce: 5
+  gravityStrength: 20
   groundMask:
     serializedVersion: 2
     m_Bits: 8
   groundProbeDistance: 0.15
   groundGraceWindow: 0.12
+  stuckSpeedThreshold: 0.8
+  cornerNormalAngle: 25
+  escapeForce: 30
+  escapeNormalBias: 0.6
   decomposeMinSpeed: 0.5
 --- !u!1 &1775822625
 GameObject:
@@ -11599,7 +11616,7 @@ Transform:
   m_GameObject: {fileID: 1928131243}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 17.8, y: -207.1, z: 510.4}
+  m_LocalPosition: {x: 19.63, y: -222.30002, z: 485.74}
   m_LocalScale: {x: 20, y: 20, z: 0.5}
   m_ConstrainProportionsScale: 0
   m_Children: []

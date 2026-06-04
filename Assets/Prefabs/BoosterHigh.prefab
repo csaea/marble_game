@@ -127,7 +127,9 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Boost
   boostMultiplier: 5
   minimumBoostSpeed: 8
-  maximumSpeed: 150
+  maximumSpeed: 100
+  boostDuration: 5
+  boostDamping: 0
   marbleTag: Player
   onBoost:
     m_PersistentCalls:

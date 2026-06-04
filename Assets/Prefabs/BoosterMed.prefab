@@ -14,7 +14,7 @@ GameObject:
   - component: {fileID: 1668550778815463577}
   - component: {fileID: 3213914094574807482}
   m_Layer: 0
-  m_Name: Booster Med
+  m_Name: BoosterMed
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -127,7 +127,9 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Boost
   boostMultiplier: 3
   minimumBoostSpeed: 8
-  maximumSpeed: 80
+  maximumSpeed: 75
+  boostDuration: 5
+  boostDamping: 0
   marbleTag: Player
   onBoost:
     m_PersistentCalls:

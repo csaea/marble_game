@@ -10,18 +10,31 @@ using System.Collections.Generic;
 ///     THROTTLE  (along travel)  — capped by maxControlledSpeed when
 ///                                 accelerating; braking is always allowed.
 ///     STEERING  (perp to travel) — always applied.
-///   AIRBORNE — the "letting go" moment. NO throttle, only a faint steer.
+///   AIRBORNE — the "letting go" moment. Only FAINT throttle and FAINT steer.
+///              No speed cap. Bad jumps cannot be rescued — only nudged.
+///
+/// BRAKE (Spacebar, ground-only) — hold to decelerate at a constant rate
+///   (brakeForce, in units/sec²). Brake overrides throttle so holding Space
+///   and W simultaneously doesn't fight; steering is preserved so the player
+///   can still aim while braking. Per-step velocity change is clamped so the
+///   brake never overshoots into reverse.
+///
+/// LURCH (Shift, ground-only) — one-shot ADDITIVE velocity boost. Tap Shift
+///   and the marble's horizontal speed increases by lurchSpeedBoost in the
+///   current direction of travel, clamped to lurchMaxSpeed. Vertical
+///   velocity is preserved so gravity is unaffected. A cooldown gates the
+///   re-use; at or above the ceiling, the lurch fizzles entirely. Additive
+///   means it cannot compound by chaining — and the ceiling is hard, not
+///   a soft trigger threshold.
 ///
 /// GRAVITY — applied entirely by this script. Rigidbody 'Use Gravity' is
 ///   forced off in Awake so this script is the single source of truth.
 ///
 /// GROUND CHECK — downward spherecast + coyote grace buffer.
 ///
-/// ANTI-STUCK ESCAPE — when the marble is wedged in a sharp corner (touching
-///   2+ differently-facing surfaces), is nearly stationary, AND the player is
-///   giving input, an escape force is applied along the summed contact
-///   normals (the open-space direction), blended with player input. This
-///   guarantees the player can always work the marble free of a corner.
+/// ANTI-STUCK ESCAPE — wedged in a sharp corner, nearly stationary, with
+///   input held: apply an escape force along summed contact normals (open
+///   space) blended with player input.
 ///
 /// RESET — R returns the marble to its respawn point; checkpoint-ready.
 /// </summary>
@@ -44,8 +57,41 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float steerForce = 22f;
 
     [Header("Air control — the 'letting go' moment")]
-    [Tooltip("Faint sideways nudge allowed mid-air. NO air throttle.")]
+    [Tooltip("Faint sideways nudge allowed mid-air. Deliberately small.")]
     [SerializeField] private float airSteerForce = 4f;
+
+    [Tooltip("Faint forward/back nudge allowed mid-air. Positive input forward "
+           + "of travel = slight acceleration; against travel = slight braking. "
+           + "There is NO air speed cap — bad jumps still cannot be rescued.")]
+    [SerializeField] private float airThrottleForce = 4f;
+
+    [Header("Lurch (Shift)")]
+    [Tooltip("Speed added (in units/sec) to the marble's horizontal velocity, "
+           + "in the current direction of travel. Additive so chaining cannot "
+           + "compound — every lurch is at most this much added speed.")]
+    [SerializeField] private float lurchSpeedBoost = 10f;
+
+    [Tooltip("Hard horizontal-speed ceiling for the lurch. If the marble is "
+           + "already at or above this speed (e.g. from a long descent) the "
+           + "lurch FIZZLES — the cooldown is NOT consumed. Below the ceiling, "
+           + "the post-lurch speed is clamped to this value.")]
+    [SerializeField] private float lurchMaxSpeed = 30f;
+
+    [Tooltip("Seconds the player must wait between lurches. The lurch should "
+           + "feel like a deliberate commit, not a held button.")]
+    [SerializeField] private float lurchCooldown = 1.5f;
+
+    [Tooltip("Minimum horizontal speed required to lurch. Below this there is "
+           + "no momentum to amplify — the lurch fizzles and the cooldown is "
+           + "NOT consumed. Forces the player to set up speed before lurching.")]
+    [SerializeField] private float lurchMinSpeed = 0.5f;
+
+    [Header("Brake (Spacebar)")]
+    [Tooltip("Constant deceleration (units/sec^2) while Brake is held on the "
+           + "ground. Significantly higher than moveForce so braking always "
+           + "wins over throttle. Time to stop scales with speed: brake = 50, "
+           + "speed = 30 stops in ~0.6s; speed = 12 stops in ~0.24s.")]
+    [SerializeField] private float brakeForce = 50f;
 
     [Header("Gravity (this script is the ONLY source — Use Gravity is forced off)")]
     [Tooltip("Downward acceleration in units/sec^2. Applied mass-independently.")]
@@ -57,21 +103,18 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float groundGraceWindow = 0.12f;
 
     [Header("Anti-stuck escape")]
-    [Tooltip("Marble is considered 'wedged' only when its speed is below this. "
-           + "Above it, the marble is clearly already moving and needs no help.")]
+    [Tooltip("Marble is considered 'wedged' only when its speed is below this.")]
     [SerializeField] private float stuckSpeedThreshold = 0.8f;
 
     [Tooltip("Two contact normals count as DIFFERENT surfaces (a real corner) "
-           + "only if they differ by more than this angle, in degrees. Stops "
-           + "two contacts on one flat wall from triggering the escape.")]
+           + "only if they differ by more than this angle, in degrees.")]
     [SerializeField] private float cornerNormalAngle = 25f;
 
     [Tooltip("Escape force applied to work the marble out of a corner.")]
     [SerializeField] private float escapeForce = 30f;
 
     [Tooltip("Blend of the escape: 1 = purely along the open-space normal, "
-           + "0 = purely player input. Mid values leave the corner biased "
-           + "toward where the player is steering.")]
+           + "0 = purely player input.")]
     [Range(0f, 1f)]
     [SerializeField] private float escapeNormalBias = 0.6f;
 
@@ -83,6 +126,9 @@ public class PlayerController : MonoBehaviour
     // --- Input ---
     private PlayerControls controls;
     private Vector2 moveInput;
+    private bool boostRequested;          // set on Shift press, consumed in FixedUpdate
+    private float nextLurchTime;          // earliest Time.time the next lurch may fire
+    private bool brakeHeld;               // Spacebar held — overrides throttle, applies decel
     private bool resetRequested;
 
     // --- Components ---
@@ -98,7 +144,6 @@ public class PlayerController : MonoBehaviour
     private Quaternion respawnRotation;
 
     // --- Contact tracking (for anti-stuck) ---
-    // Contact normals gathered this physics step, cleared each FixedUpdate.
     private readonly List<Vector3> contactNormals = new List<Vector3>();
 
     private void Awake()
@@ -131,13 +176,16 @@ public class PlayerController : MonoBehaviour
     private void Update()
     {
         moveInput = controls.Marble.Move.ReadValue<Vector2>();
+        brakeHeld = controls.Marble.Brake.IsPressed();
+
+        // Tap, not hold — set a flag, consume it in FixedUpdate.
+        if (controls.Marble.Boost.WasPressedThisFrame())
+            boostRequested = true;
 
         if (controls.Marble.Reset.WasPressedThisFrame())
             resetRequested = true;
     }
 
-    // Gather every contact normal the marble currently has. OnCollisionStay
-    // fires each physics step for every collider still in contact.
     private void OnCollisionStay(Collision collision)
     {
         for (int i = 0; i < collision.contactCount; i++)
@@ -157,13 +205,24 @@ public class PlayerController : MonoBehaviour
         UpdateGroundState();
         ApplyGravity();
 
+        // Resolve lurch BEFORE the per-frame force pass. If it fires, the
+        // boosted velocity is what subsequent force code sees this step.
+        if (boostRequested)
+        {
+            TryLurch();
+            boostRequested = false;
+        }
+
+        // Brake runs before per-frame control. ApplyGroundForce will skip
+        // throttle while brakeHeld so the two never fight.
+        if (brakeHeld && isGrounded)
+            ApplyBrake();
+
         bool hasInput = moveInput.sqrMagnitude > 0.0001f;
         Vector3 desiredDir = hasInput && cameraTransform != null
             ? CameraRelativeDirection(moveInput)
             : Vector3.zero;
 
-        // Anti-stuck escape runs BEFORE normal control and, when it fires,
-        // replaces normal control for this step.
         if (hasInput && TryEscapeCorner(desiredDir))
         {
             contactNormals.Clear();
@@ -176,26 +235,14 @@ public class PlayerController : MonoBehaviour
             else            ApplyAirForce(desiredDir);
         }
 
-        // Contacts are per-step; clear them for the next step's gathering.
         contactNormals.Clear();
     }
 
-    /// <summary>
-    /// If the marble is wedged in a sharp corner and nearly stationary, applies
-    /// an escape force along the summed contact normals (open-space direction)
-    /// blended with player input. Returns true if the escape fired.
-    /// </summary>
     private bool TryEscapeCorner(Vector3 desiredDir)
     {
-        // Must be nearly stationary — a moving marble is not stuck.
         if (rb.linearVelocity.magnitude > stuckSpeedThreshold) return false;
-
-        // Need at least two contacts to form a corner.
         if (contactNormals.Count < 2) return false;
 
-        // Confirm the contacts represent genuinely DIFFERENT surfaces — not
-        // several contact points on one flat wall. Find any pair of normals
-        // that differ by more than cornerNormalAngle.
         bool realCorner = false;
         for (int i = 0; i < contactNormals.Count && !realCorner; i++)
             for (int j = i + 1; j < contactNormals.Count; j++)
@@ -206,18 +253,14 @@ public class PlayerController : MonoBehaviour
                 }
         if (!realCorner) return false;
 
-        // Sum the normals → a direction pointing away from all touched
-        // surfaces, i.e. toward open space. Flatten Y so the escape pushes
-        // the marble along the ground, not up into the air.
         Vector3 openDir = Vector3.zero;
         foreach (Vector3 n in contactNormals)
             openDir += n;
         openDir.y = 0f;
 
-        if (openDir.sqrMagnitude < 0.0001f) return false;   // degenerate — give up gracefully
+        if (openDir.sqrMagnitude < 0.0001f) return false;
         openDir.Normalize();
 
-        // Blend the open-space direction with the player's input.
         Vector3 escapeDir = (openDir * escapeNormalBias
                           + desiredDir * (1f - escapeNormalBias));
         if (escapeDir.sqrMagnitude < 0.0001f) escapeDir = openDir;
@@ -225,6 +268,63 @@ public class PlayerController : MonoBehaviour
 
         rb.AddForce(escapeDir * escapeForce, ForceMode.Force);
         return true;
+    }
+
+    /// <summary>
+    /// One-shot additive speed boost in the current direction of travel. Gates:
+    ///   - Must be grounded (lurch belongs to setup, not the air "letting go").
+    ///   - Cooldown must be clear.
+    ///   - Marble must already have momentum above lurchMinSpeed.
+    ///   - Marble must be BELOW lurchMaxSpeed (hard ceiling).
+    /// If any gate fails the lurch fizzles and the cooldown is NOT consumed.
+    /// The post-lurch speed is clamped to lurchMaxSpeed, so near the ceiling
+    /// the effective boost is reduced. Additive design prevents chaining from
+    /// compounding into unbounded speed.
+    /// </summary>
+    private void TryLurch()
+    {
+        if (!isGrounded) return;
+        if (Time.time < nextLurchTime) return;
+
+        Vector3 hVel = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
+        float speed = hVel.magnitude;
+
+        if (speed < lurchMinSpeed) return;       // no momentum to amplify
+        if (speed >= lurchMaxSpeed) return;      // already at the ceiling
+
+        // Add boost magnitude, clamped to the ceiling. Direction preserved.
+        float newSpeed = Mathf.Min(speed + lurchSpeedBoost, lurchMaxSpeed);
+        Vector3 dir = hVel / speed;
+        Vector3 newHVel = dir * newSpeed;
+        rb.linearVelocity = new Vector3(newHVel.x, rb.linearVelocity.y, newHVel.z);
+
+        nextLurchTime = Time.time + lurchCooldown;
+    }
+
+    /// <summary>
+    /// Constant-rate deceleration on horizontal velocity. Direction is the
+    /// opposite of current travel — pure decay, never redirection. Per-step
+    /// change is clamped against the current speed so the brake never
+    /// overshoots into reverse. Vertical velocity is preserved so gravity
+    /// is unaffected. ForceMode.Acceleration so brakeForce is mass-independent.
+    /// </summary>
+    private void ApplyBrake()
+    {
+        Vector3 hVel = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
+        float speed = hVel.magnitude;
+        if (speed < 0.01f) return;       // already effectively stopped
+
+        // Velocity change the brake would produce this physics step.
+        float dvThisStep = brakeForce * Time.fixedDeltaTime;
+        if (dvThisStep >= speed)
+        {
+            // Would overshoot into reverse — zero horizontal velocity instead.
+            rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
+            return;
+        }
+
+        Vector3 brakeDir = -hVel / speed;
+        rb.AddForce(brakeDir * brakeForce, ForceMode.Acceleration);
     }
 
     private void ApplyGravity()
@@ -263,6 +363,12 @@ public class PlayerController : MonoBehaviour
         isGrounded = (Time.time - lastGroundedTime) <= groundGraceWindow;
     }
 
+    /// <summary>
+    /// Ground control: throttle/steer split, speed cap, braking via S-key.
+    /// When brakeHeld (Spacebar) is true, throttle is SKIPPED entirely — the
+    /// dedicated brake handles deceleration. Steering remains active so the
+    /// player can aim while braking. The lurch is a separate one-shot path.
+    /// </summary>
     private void ApplyGroundForce(Vector3 desiredDir)
     {
         Vector3 hVel = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
@@ -270,7 +376,10 @@ public class PlayerController : MonoBehaviour
 
         if (speed < decomposeMinSpeed)
         {
-            rb.AddForce(desiredDir * moveForce, ForceMode.Force);
+            // Below the decomposition threshold the input is wholesale. If
+            // brake is held, suppress that too — brake should always dominate.
+            if (!brakeHeld)
+                rb.AddForce(desiredDir * moveForce, ForceMode.Force);
             return;
         }
 
@@ -280,16 +389,26 @@ public class PlayerController : MonoBehaviour
         Vector3 throttleDir = vHat * along;
         Vector3 steerDir    = desiredDir - throttleDir;
 
-        Vector3 force = steerDir * steerForce;
+        Vector3 force = steerDir * steerForce;                 // steering always
 
-        if (along < 0f)
-            force += throttleDir * moveForce;
-        else if (speed < maxControlledSpeed)
-            force += throttleDir * moveForce;
+        // Throttle suppressed while braking — Space dominates W/S throttle.
+        if (!brakeHeld)
+        {
+            if (along < 0f)
+                force += throttleDir * moveForce;              // braking via S
+            else if (speed < maxControlledSpeed)
+                force += throttleDir * moveForce;              // accelerating, under cap
+        }
 
         rb.AddForce(force, ForceMode.Force);
     }
 
+    /// <summary>
+    /// Airborne: the "letting go" moment. Both components of input are applied
+    /// at deliberately weak forces — perpendicular as steering, along-velocity
+    /// as throttle (positive accelerates, negative brakes). No speed cap. Weak
+    /// enough that a bad jump cannot be rescued, only nudged.
+    /// </summary>
     private void ApplyAirForce(Vector3 desiredDir)
     {
         Vector3 hVel = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
@@ -298,10 +417,16 @@ public class PlayerController : MonoBehaviour
         if (speed < decomposeMinSpeed) return;
 
         Vector3 vHat = hVel / speed;
-        float along = Vector3.Dot(desiredDir, vHat);
-        Vector3 steerDir = desiredDir - vHat * along;
 
-        rb.AddForce(steerDir * airSteerForce, ForceMode.Force);
+        // Decompose against travel — same shape as ground, different magnitudes.
+        float along = Vector3.Dot(desiredDir, vHat);
+        Vector3 throttleDir = vHat * along;             // sign carries accel/brake
+        Vector3 steerDir    = desiredDir - throttleDir; // perpendicular to travel
+
+        Vector3 force = steerDir * airSteerForce
+                      + throttleDir * airThrottleForce;
+
+        rb.AddForce(force, ForceMode.Force);
     }
 
     private Vector3 CameraRelativeDirection(Vector2 input)
